@@ -53,6 +53,9 @@ typedef struct {
     // Wi-Fi AP creds
     char ap_ssid[32];
     char ap_pass[64];
+    // Wi-Fi STA creds (join existing network)
+    char sta_ssid[32];
+    char sta_pass[64];
 } app_config_t;
 
 static app_config_t g_cfg;
@@ -66,6 +69,8 @@ static app_config_t g_cfg;
 #define NVS_KEY_GW    "gw"
 #define NVS_KEY_SSID  "ap_ssid"
 #define NVS_KEY_APPSK "ap_pass"
+#define NVS_KEY_STA_SSID  "sta_ssid"
+#define NVS_KEY_STA_PSK   "sta_pass"
 
 /* ====== Auth (very simple Basic Auth) ======
    For production, prefer cookies + CSRF.
@@ -111,6 +116,8 @@ static bool check_basic_auth(httpd_req_t *req) {
 }
 
 static esp_netif_t *eth_netif = NULL;
+static esp_netif_t *wifi_ap_netif = NULL;
+static esp_netif_t *wifi_sta_netif = NULL;
 static httpd_handle_t server = NULL;
 
 /* ====== Servo control via LEDC ====== */
@@ -182,6 +189,8 @@ static void cfg_load_defaults(void){
     ip4addr_aton("192.168.1.1", &ip);  g_cfg.gw = ip.addr;
     strcpy(g_cfg.ap_ssid,  "Device-XXXX");
     strcpy(g_cfg.ap_pass,  "setup-1234");
+    g_cfg.sta_ssid[0] = '\0';
+    g_cfg.sta_pass[0] = '\0';
 }
 
 static void cfg_save(void){
@@ -194,6 +203,8 @@ static void cfg_save(void){
     nvs_set_u32(h, NVS_KEY_GW,    g_cfg.gw);
     nvs_set_str(h, NVS_KEY_SSID,  g_cfg.ap_ssid);
     nvs_set_str(h, NVS_KEY_APPSK, g_cfg.ap_pass);
+    nvs_set_str(h, NVS_KEY_STA_SSID, g_cfg.sta_ssid);
+    nvs_set_str(h, NVS_KEY_STA_PSK,  g_cfg.sta_pass);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -207,6 +218,12 @@ static void cfg_load(void){
     }
     if (nvs_get_str(h, NVS_KEY_PASS, NULL, &len) == ESP_OK && len<sizeof(g_cfg.admin_pass)) {
         nvs_get_str(h, NVS_KEY_PASS, g_cfg.admin_pass, &len);
+    }
+    if (nvs_get_str(h, NVS_KEY_STA_SSID, NULL, &len) == ESP_OK && len<sizeof(g_cfg.sta_ssid)) {
+        nvs_get_str(h, NVS_KEY_STA_SSID, g_cfg.sta_ssid, &len);
+    }
+    if (nvs_get_str(h, NVS_KEY_STA_PSK, NULL, &len) == ESP_OK && len<sizeof(g_cfg.sta_pass)) {
+        nvs_get_str(h, NVS_KEY_STA_PSK, g_cfg.sta_pass, &len);
     }
     uint32_t v;
     if (nvs_get_u32(h, NVS_KEY_IP, &v) == ESP_OK) g_cfg.ip=v;
@@ -240,6 +257,12 @@ static const char *INDEX_HTML =
 "<label>Gateway<input id=gw placeholder='192.168.1.1'></label>"
 "<label>AP SSID<input id=ssid></label>"
 "<label>AP Password<input id=psk type=password></label>"
+
+"<hr><b>Join Existing Wi-Fi (STA)</b>"
+"<label>STA SSID<input id=sta_ssid></label>"
+"<label>STA Password<input id=sta_psk type=password></label>"
+"<button onclick='joinsta()'>Join Wi-Fi</button>"
+
 "<button onclick='save()'>Save</button>"
 "</fieldset>"
 "<script>"
@@ -247,7 +270,10 @@ static const char *INDEX_HTML =
 " const r=await fetch('/api/actuator',{method:'POST',headers:{'Content-Type':'application/json'},"
 " body:JSON.stringify({action:kind})}); if(!r.ok) alert('Actuator failed');}"
 "async function load(){const r=await fetch('/api/config'); if(r.ok){const c=await r.json();"
-" u.value=c.user; ip.value=c.ip; mask.value=c.mask; gw.value=c.gw; ssid.value=c.ap_ssid;}}"
+" u.value=c.user; ip.value=c.ip; mask.value=c.mask; gw.value=c.gw; ssid.value=c.ap_ssid; if(c.sta_ssid) sta_ssid.value=c.sta_ssid;}}"
+"async function joinsta(){const body={ssid:sta_ssid.value, pass:sta_psk.value};"
+" const r=await fetch('/api/wifi/join',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});"
+" if(r.ok) alert('Joining… check logs and STA IP.'); else alert('Join failed');}"
 "async function save(){const body={user:u.value, pass:p.value, ip:ip.value, mask:mask.value, gw:gw.value, ap_ssid:ssid.value, ap_pass:psk.value};"
 " const r=await fetch('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});"
 " if(r.ok) alert('Saved. Reboot may be needed.'); else alert('Save failed');}"
@@ -277,8 +303,8 @@ static esp_err_t status_get(httpd_req_t *req){
     ip4_addr_t mask = { .addr = g_cfg.netmask };
     ip4_addr_t gw = { .addr = g_cfg.gw };
     snprintf(buf, sizeof(buf),
-        "{\"user\":\"%s\",\"ip\":\"%s\",\"mask\":\"%s\",\"gw\":\"%s\",\"ap_ssid\":\"%s\"}",
-        g_cfg.admin_user, ip4addr_ntoa(&ip), ip4addr_ntoa(&mask), ip4addr_ntoa(&gw), g_cfg.ap_ssid);
+        "{\"user\":\"%s\",\"ip\":\"%s\",\"mask\":\"%s\",\"gw\":\"%s\",\"ap_ssid\":\"%s\",\"sta_ssid\":\"%s\"}",
+        g_cfg.admin_user, ip4addr_ntoa(&ip), ip4addr_ntoa(&mask), ip4addr_ntoa(&gw), g_cfg.ap_ssid, g_cfg.sta_ssid);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, buf);
 }
@@ -320,6 +346,27 @@ static esp_err_t config_put(httpd_req_t *req){
     return ESP_OK;
 }
 
+static esp_err_t wifi_join_sta(const char* ssid, const char* pass);
+static esp_err_t wifi_join_post(httpd_req_t *req){
+    if (auth_guard(req) != ESP_OK) return ESP_FAIL;
+    char body[256]; int len = httpd_req_recv(req, body, sizeof(body)-1);
+    if (len <= 0) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no body"); return ESP_FAIL; }
+    body[len] = 0;
+
+    char ssid[32]={0}, psk[64]={0};
+    #define GET_STR(KEY,DEST,SZ) do{ char *p=strstr(body, "\"" KEY "\""); \
+        if(p){ p=strchr(p,':'); if(p){ p++; while(*p==' '||*p=='\"') p++; char *q=p; while(*q && *q!='\"' && *q!='}' && *q!=',' && (q-p)<(SZ-1)) q++; \
+        size_t n=q-p; if(n>0){ memcpy(DEST,p,n); DEST[n]=0; } } } }while(0)
+    GET_STR("ssid", ssid, sizeof(ssid));
+    GET_STR("pass", psk,  sizeof(psk));
+
+    if (!ssid[0]) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ssid required"); return ESP_FAIL; }
+    esp_err_t r = wifi_join_sta(ssid, psk);
+    if (r != ESP_OK) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "join failed"); return ESP_FAIL; }
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
 static esp_err_t actuator_post(httpd_req_t *req){
     if (auth_guard(req) != ESP_OK) return ESP_FAIL;
     char body[64]; int len=httpd_req_recv(req, body, sizeof(body)-1);
@@ -346,10 +393,12 @@ static httpd_handle_t start_web(void){
     httpd_uri_t stat = {.uri="/api/config", .method=HTTP_GET, .handler=status_get};
     httpd_uri_t confput = {.uri="/api/config", .method=HTTP_PUT, .handler=config_put};
     httpd_uri_t act  = {.uri="/api/actuator", .method=HTTP_POST, .handler=actuator_post};
+    httpd_uri_t join = {.uri="/api/wifi/join", .method=HTTP_POST, .handler=wifi_join_post};
     httpd_register_uri_handler(server, &root);
     httpd_register_uri_handler(server, &stat);
     httpd_register_uri_handler(server, &confput);
     httpd_register_uri_handler(server, &act);
+    httpd_register_uri_handler(server, &join);
     return server;
 }
 
@@ -426,14 +475,48 @@ static void eth_init(void) {
     ESP_ERROR_CHECK( esp_eth_start(eth_handle) );
 }
 
+/* ====== Wi-Fi STA (connect to network) ====== */
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        ESP_LOGI(TAG, "STA started, connecting...");
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        ESP_LOGW(TAG, "STA disconnected, retrying in 2s");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        esp_wifi_connect();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* e = (ip_event_got_ip_t*)event_data;
+        ESP_LOGI(TAG, "STA got IP: %s", ip4addr_ntoa((const ip4_addr_t*)&e->ip_info.ip));
+    }
+}
+
+static esp_err_t wifi_join_sta(const char* ssid, const char* pass) {
+    if (ssid && ssid[0]) strncpy(g_cfg.sta_ssid, ssid, sizeof(g_cfg.sta_ssid)-1);
+    if (pass && pass[0]) strncpy(g_cfg.sta_pass, pass, sizeof(g_cfg.sta_pass)-1);
+    cfg_save();
+
+    wifi_config_t sta = {0};
+    snprintf((char*)sta.sta.ssid, sizeof(sta.sta.ssid), "%s", g_cfg.sta_ssid);
+    snprintf((char*)sta.sta.password, sizeof(sta.sta.password), "%s", g_cfg.sta_pass);
+    sta.sta.threshold.authmode = (strlen((char*)sta.sta.password) >= 8) ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+
+    ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_APSTA) );
+    ESP_ERROR_CHECK( esp_wifi_set_config(WIFI_IF_STA, &sta) );
+    return esp_wifi_connect();
+}
+
 /* ====== Wi-Fi AP (setup network) ====== */
 static void wifi_ap_init(void){
     ESP_ERROR_CHECK( esp_netif_init() ); // ensure called
-    esp_netif_create_default_wifi_ap();
+
+    wifi_ap_netif  = esp_netif_create_default_wifi_ap();
+    wifi_sta_netif = esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t wicfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK( esp_wifi_init(&wicfg) );
-    ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_AP) );
+
+    ESP_ERROR_CHECK( esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL) );
+    ESP_ERROR_CHECK( esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL) );
 
     wifi_config_t ap = {0};
     snprintf((char*)ap.ap.ssid, sizeof(ap.ap.ssid), "%s", g_cfg.ap_ssid);
@@ -442,8 +525,22 @@ static void wifi_ap_init(void){
     ap.ap.max_connection = 4;
     ap.ap.authmode = (strlen((char*)ap.ap.password) >= 8) ? WIFI_AUTH_WPA_WPA2_PSK : WIFI_AUTH_OPEN;
     ap.ap.channel = 6;
+    ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_APSTA) );
     ESP_ERROR_CHECK( esp_wifi_set_config(WIFI_IF_AP, &ap) );
+
+    if (g_cfg.sta_ssid[0]) {
+        wifi_config_t sta = {0};
+        snprintf((char*)sta.sta.ssid, sizeof(sta.sta.ssid), "%s", g_cfg.sta_ssid);
+        snprintf((char*)sta.sta.password, sizeof(sta.sta.password), "%s", g_cfg.sta_pass);
+        sta.sta.threshold.authmode = (strlen((char*)sta.sta.password) >= 8) ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+        ESP_ERROR_CHECK( esp_wifi_set_config(WIFI_IF_STA, &sta) );
+    }
+
     ESP_ERROR_CHECK( esp_wifi_start() );
+
+    if (g_cfg.sta_ssid[0]) {
+        esp_wifi_connect();
+    }
 }
 
 /* ====== mDNS ====== */

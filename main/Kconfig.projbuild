@@ -1,0 +1,41 @@
+menu "App Defaults (preseed NVS on first boot)"
+config APP_PRESEED_ENABLE
+    bool "Preseed from sdkconfig defaults"
+    default y
+
+config APP_DEFAULT_ADMIN_USER
+    string "Default admin username"
+    default "admin"
+
+config APP_DEFAULT_ADMIN_PASS
+    string "Default admin password"
+    default "changeme"
+
+config APP_DEFAULT_ETH_IP
+    string "Default Ethernet static IP"
+    default "192.168.1.50"
+
+config APP_DEFAULT_ETH_MASK
+    string "Default Ethernet netmask"
+    default "255.255.255.0"
+
+config APP_DEFAULT_ETH_GW
+    string "Default Ethernet gateway"
+    default "192.168.1.1"
+
+config APP_DEFAULT_AP_SSID
+    string "Default AP SSID"
+    default "Device-XXXX"
+
+config APP_DEFAULT_AP_PASS
+    string "Default AP password"
+    default "setup-1234"
+
+config APP_DEFAULT_STA_SSID
+    string "Default STA SSID"
+    default ""
+
+config APP_DEFAULT_STA_PASS
+    string "Default STA password"
+    default ""
+endmenu

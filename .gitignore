@@ -43,3 +43,8 @@
 # build
 build/**
 managed_components/**
+
+
+sdkconfig.secrets
+sdkconfig
+sdkconfig.old

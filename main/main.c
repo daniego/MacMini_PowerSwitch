@@ -182,15 +182,34 @@ static void maybe_factory_reset(void) {
 /* ====== Config load/save ====== */
 static void cfg_load_defaults(void){
     memset(&g_cfg, 0, sizeof(g_cfg));
+
+#ifdef CONFIG_APP_PRESEED_ENABLE
+    strcpy(g_cfg.admin_user, CONFIG_APP_DEFAULT_ADMIN_USER);
+    strcpy(g_cfg.admin_pass, CONFIG_APP_DEFAULT_ADMIN_PASS);
+
+    ip4_addr_t ip;
+    ip4addr_aton(CONFIG_APP_DEFAULT_ETH_IP, &ip); g_cfg.ip = ip.addr;
+    ip4addr_aton(CONFIG_APP_DEFAULT_ETH_MASK, &ip); g_cfg.netmask = ip.addr;
+    ip4addr_aton(CONFIG_APP_DEFAULT_ETH_GW, &ip);  g_cfg.gw = ip.addr;
+
+    strcpy(g_cfg.ap_ssid,  CONFIG_APP_DEFAULT_AP_SSID);
+    strcpy(g_cfg.ap_pass,  CONFIG_APP_DEFAULT_AP_PASS);
+
+    strncpy(g_cfg.sta_ssid, CONFIG_APP_DEFAULT_STA_SSID, sizeof(g_cfg.sta_ssid)-1);
+    strncpy(g_cfg.sta_pass, CONFIG_APP_DEFAULT_STA_PASS, sizeof(g_cfg.sta_pass)-1);
+#else
+    // your current hardcoded defaults (fallback)
     strcpy(g_cfg.admin_user, "admin");
     strcpy(g_cfg.admin_pass, "changeme");
-    ip4_addr_t ip; ip4addr_aton("192.168.1.50", &ip); g_cfg.ip = ip.addr;
+    ip4_addr_t ip;
+    ip4addr_aton("192.168.1.50", &ip); g_cfg.ip = ip.addr;
     ip4addr_aton("255.255.255.0", &ip); g_cfg.netmask = ip.addr;
     ip4addr_aton("192.168.1.1", &ip);  g_cfg.gw = ip.addr;
     strcpy(g_cfg.ap_ssid,  "Device-XXXX");
     strcpy(g_cfg.ap_pass,  "setup-1234");
-    g_cfg.sta_ssid[0] = '\0';
-    g_cfg.sta_pass[0] = '\0';
+    g_cfg.sta_ssid[0] = '\\0';
+    g_cfg.sta_pass[0] = '\\0';
+#endif
 }
 
 static void cfg_save(void){

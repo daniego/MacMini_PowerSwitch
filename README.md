@@ -59,5 +59,24 @@ idf.py -p /dev/ttyUSB0 flash monitor
 - If W5500 fails, reduce SPI clock in `main.c`
 - If AP not visible, set Wi-Fi country domain in menuconfig
 
+## ESP tool
+Get it set up
+```git clone git@github.com:espressif/esptool.git
+cd esptool
+mkvirtualenv esptool
+pip install pyserial
+```
+### Basic chip identity
+`esptool.py --port /dev/ttyUSB0 chip_id`
+
+### Read MAC address
+`esptool.py --port /dev/ttyUSB0 read_mac`
+
+### SPI flash manufacturer / device ID
+`esptool.py --port /dev/ttyUSB0 flash_id`
+
+### Show the activities
+`screen  /dev/cu.usbserial-0001 115200`
+
 ## License
 MIT

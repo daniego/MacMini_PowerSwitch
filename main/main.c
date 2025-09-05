@@ -126,17 +126,22 @@ static esp_netif_t *wifi_sta_netif = NULL;
 static httpd_handle_t server = NULL;
 
 /* ====== Servo control via LEDC ====== */
+static void servo_write_us(int microseconds);
 static void servo_init(void) {
+    // (Optional safety) Explicitly set pin as output before LEDC takes over
+    gpio_config_t sgio = { .pin_bit_mask = 1ULL<<PIN_SERVO_PWM, .mode = GPIO_MODE_OUTPUT, .pull_up_en = 0, .pull_down_en = 0 };
+    gpio_config(&sgio);
+
     ledc_timer_config_t tcfg = {
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .duty_resolution = LEDC_TIMER_16_BIT,
+        .speed_mode = LEDC_HIGH_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_12_BIT, // 0..4095
         .timer_num = LEDC_TIMER_0,
         .freq_hz = 50,   // standard servo
-        .clk_cfg = LEDC_AUTO_CLK
+        .clk_cfg = LEDC_USE_APB_CLK
     };
     ledc_timer_config(&tcfg);
     ledc_channel_config_t ccfg = {
-        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .speed_mode = LEDC_HIGH_SPEED_MODE,
         .channel    = LEDC_CHANNEL_0,
         .timer_sel  = LEDC_TIMER_0,
         .gpio_num   = PIN_SERVO_PWM,
@@ -144,14 +149,17 @@ static void servo_init(void) {
         .hpoint     = 0
     };
     ledc_channel_config(&ccfg);
+    gpio_set_drive_capability(PIN_SERVO_PWM, GPIO_DRIVE_CAP_3);
+    // Initialize output to home position for visible startup pulse
+    servo_write_us(g_cfg.servo_home_us ? g_cfg.servo_home_us : 1500);
 }
 
 static void servo_write_us(int microseconds) {
-    // 50Hz period = 20,000 us; 16-bit duty out of 65535
-    // duty = (us / 20000) * 65535
-    uint32_t duty = (uint32_t)((microseconds * 65535ULL) / 20000ULL);
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
-    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+    // 50Hz period = 20,000 us; 12-bit duty out of 4095
+    // duty = (us / 20000) * 4095
+    uint32_t duty = (uint32_t)((microseconds * 4095ULL) / 20000ULL);
+    ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, duty);
+    ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
 }
 
 static void servo_home(void) { servo_write_us(g_cfg.servo_home_us); } // neutral
@@ -299,7 +307,14 @@ static const char *INDEX_HTML =
 "<hr><b>Servo Positions</b>"
 "<label>Home (µs)<input id=svh type=number min=800 max=2200 step=10></label>"
 "<label>Press (µs)<input id=svp type=number min=800 max=2200 step=10></label>"
-
+"<div style='margin-top:8px'>"
+"<input id=svslider type=range min=800 max=2200 step=5 oninput='slidermove(this.value)'>"
+"<div id=svreadout>1500 µs</div>"
+"</div>"
+"<div style='display:flex;gap:8px;margin-top:8px'>"
+"<button onclick='testservo(\"home\")'>Test Home</button>"
+"<button onclick='testservo(\"press\")'>Test Press</button>"
+"</div>"
 "<button onclick='save()'>Save</button>"
 "</fieldset>"
 "<script>"
@@ -307,10 +322,15 @@ static const char *INDEX_HTML =
 " const r=await fetch('/api/actuator',{method:'POST',headers:{'Content-Type':'application/json'},"
 " body:JSON.stringify({action:kind})}); if(!r.ok) alert('Actuator failed');}"
 "async function load(){const r=await fetch('/api/config'); if(r.ok){const c=await r.json();"
-" u.value=c.user; ip.value=c.ip; mask.value=c.mask; gw.value=c.gw; ssid.value=c.ap_ssid; if(c.sta_ssid) sta_ssid.value=c.sta_ssid; if(c.servo_home_us) svh.value=c.servo_home_us; if(c.servo_press_us) svp.value=c.servo_press_us;}}"
+" u.value=c.user; ip.value=c.ip; mask.value=c.mask; gw.value=c.gw; ssid.value=c.ap_ssid; if(c.sta_ssid) sta_ssid.value=c.sta_ssid; if(c.servo_home_us){ svh.value=c.servo_home_us; svslider.value=c.servo_home_us; svreadout.innerText=c.servo_home_us+' µs'; } if(c.servo_press_us) svp.value=c.servo_press_us;}}"
 "async function joinsta(){const body={ssid:sta_ssid.value, pass:sta_psk.value};"
 " const r=await fetch('/api/wifi/join',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});"
 " if(r.ok) alert('Joining… check logs and STA IP.'); else alert('Join failed');}"
+"let _svdeb=null;"
+"async function testservo(kind){const us=(kind==='home')?parseInt(svh.value||0):parseInt(svp.value||0);"
+" await fetch('/api/servo/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({us:us})});}"
+"function slidermove(v){svreadout.innerText=v+' µs'; if(_svdeb) clearTimeout(_svdeb); _svdeb=setTimeout(async()=>{"
+" await fetch('/api/servo/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({us:parseInt(v)})}); _svdeb=null;},120);}"
 "async function save(){const body={user:u.value, pass:p.value, ip:ip.value, mask:mask.value, gw:gw.value, ap_ssid:ssid.value, ap_pass:psk.value, servo_home_us:parseInt(svh.value||0), servo_press_us:parseInt(svp.value||0)};"
 " const r=await fetch('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});"
 " if(r.ok) alert('Saved. Reboot may be needed.'); else alert('Save failed');}"
@@ -391,6 +411,7 @@ static esp_err_t config_put(httpd_req_t *req){
 }
 
 static esp_err_t wifi_join_sta(const char* ssid, const char* pass);
+
 static esp_err_t wifi_join_post(httpd_req_t *req){
     if (auth_guard(req) != ESP_OK) return ESP_FAIL;
     char body[256]; int len = httpd_req_recv(req, body, sizeof(body)-1);
@@ -407,6 +428,31 @@ static esp_err_t wifi_join_post(httpd_req_t *req){
     if (!ssid[0]) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ssid required"); return ESP_FAIL; }
     esp_err_t r = wifi_join_sta(ssid, psk);
     if (r != ESP_OK) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "join failed"); return ESP_FAIL; }
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
+static esp_err_t servo_test_post(httpd_req_t *req){
+    if (auth_guard(req) != ESP_OK) return ESP_FAIL;
+    char body[64]; int len = httpd_req_recv(req, body, sizeof(body)-1);
+    if (len <= 0) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no body"); return ESP_FAIL; }
+    body[len] = 0;
+
+    char us_str[8] = {0};
+    #define GET_STR_TEST(KEY,DEST,SZ) do{ char *p=strstr(body, "\"" KEY "\""); \
+        if(p){ p=strchr(p,':'); if(p){ p++; while(*p==' '||*p=='\"') p++; char *q=p; while(*q && *q!='\"' && *q!='}' && *q!=',' && (q-p)<(SZ-1)) q++; \
+        size_t n=q-p; if(n>0){ memcpy(DEST,p,n); DEST[n]=0; } } } }while(0)
+    GET_STR_TEST("us", us_str, sizeof(us_str));
+
+    if (!us_str[0]) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "us required"); return ESP_FAIL; }
+    int v = atoi(us_str);
+    if (v < 500) {
+        v = 500;
+    }
+    if (v > 2600) {
+        v = 2600; // slightly wider for testing
+    }
+    servo_write_us(v);
     httpd_resp_sendstr(req, "OK");
     return ESP_OK;
 }
@@ -443,6 +489,8 @@ static httpd_handle_t start_web(void){
     httpd_register_uri_handler(server, &confput);
     httpd_register_uri_handler(server, &act);
     httpd_register_uri_handler(server, &join);
+    httpd_uri_t st = {.uri="/api/servo/test", .method=HTTP_POST, .handler=servo_test_post};
+    httpd_register_uri_handler(server, &st);
     return server;
 }
 
@@ -456,7 +504,8 @@ static void ensure_gpio_isr(void) {
 }
 
 /* ====== Ethernet (W5500 SPI) ====== */
-static void eth_init(void) {
+// static void eth_init(void) { // temporary. to disable warning
+__attribute__((unused)) static void eth_init(void) {
     esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
     eth_netif = esp_netif_new(&cfg);
     assert(eth_netif);
@@ -588,7 +637,7 @@ static void wifi_ap_init(void){
 }
 
 /* ====== mDNS ====== */
-static void start_mdns(void){
+__attribute__((unused)) static void start_mdns(void){
     uint8_t mac[6]; esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     char host[32]; snprintf(host, sizeof(host), "device-%02X%02X", mac[4], mac[5]);
     ESP_ERROR_CHECK( mdns_init() );

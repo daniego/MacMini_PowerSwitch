@@ -56,6 +56,10 @@ typedef struct {
     // Wi-Fi STA creds (join existing network)
     char sta_ssid[32];
     char sta_pass[64];
+
+    // Servo positions (microseconds)
+    uint16_t servo_home_us;   // idle / start position
+    uint16_t servo_press_us;  // press / stop position
 } app_config_t;
 
 static app_config_t g_cfg;
@@ -71,7 +75,8 @@ static app_config_t g_cfg;
 #define NVS_KEY_APPSK "ap_pass"
 #define NVS_KEY_STA_SSID  "sta_ssid"
 #define NVS_KEY_STA_PSK   "sta_pass"
-
+#define NVS_KEY_SV_HOME "sv_home"
+#define NVS_KEY_SV_PRESS "sv_press"
 /* ====== Auth (very simple Basic Auth) ======
    For production, prefer cookies + CSRF.
    Here we keep it short to get you running fast. */
@@ -149,8 +154,8 @@ static void servo_write_us(int microseconds) {
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 
-static void servo_home(void) { servo_write_us(1500); } // neutral
-static void servo_press(void){ servo_write_us(1800); } // adjust per geometry
+static void servo_home(void) { servo_write_us(g_cfg.servo_home_us); } // neutral
+static void servo_press(void){ servo_write_us(g_cfg.servo_press_us); } // adjust per geometry
 
 static void led_set(bool on) {
     gpio_set_level(PIN_LED, on ? 1 : 0);
@@ -186,6 +191,8 @@ static void cfg_load_defaults(void){
 #ifdef CONFIG_APP_PRESEED_ENABLE
     strcpy(g_cfg.admin_user, CONFIG_APP_DEFAULT_ADMIN_USER);
     strcpy(g_cfg.admin_pass, CONFIG_APP_DEFAULT_ADMIN_PASS);
+    g_cfg.servo_home_us = 1500;
+    g_cfg.servo_press_us = 1800;
 
     ip4_addr_t ip;
     ip4addr_aton(CONFIG_APP_DEFAULT_ETH_IP, &ip); g_cfg.ip = ip.addr;
@@ -209,6 +216,8 @@ static void cfg_load_defaults(void){
     strcpy(g_cfg.ap_pass,  "setup-1234");
     g_cfg.sta_ssid[0] = '\\0';
     g_cfg.sta_pass[0] = '\\0';
+    g_cfg.servo_home_us = 1500;
+    g_cfg.servo_press_us = 1800;
 #endif
 }
 
@@ -224,6 +233,8 @@ static void cfg_save(void){
     nvs_set_str(h, NVS_KEY_APPSK, g_cfg.ap_pass);
     nvs_set_str(h, NVS_KEY_STA_SSID, g_cfg.sta_ssid);
     nvs_set_str(h, NVS_KEY_STA_PSK,  g_cfg.sta_pass);
+    nvs_set_u16(h, NVS_KEY_SV_HOME, g_cfg.servo_home_us);
+    nvs_set_u16(h, NVS_KEY_SV_PRESS, g_cfg.servo_press_us);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -254,6 +265,9 @@ static void cfg_load(void){
     if (nvs_get_str(h, NVS_KEY_APPSK, NULL, &len) == ESP_OK && len<sizeof(g_cfg.ap_pass)) {
         nvs_get_str(h, NVS_KEY_APPSK, g_cfg.ap_pass, &len);
     }
+    uint16_t sv;
+    if (nvs_get_u16(h, NVS_KEY_SV_HOME, &sv) == ESP_OK) g_cfg.servo_home_us = sv; else if (!g_cfg.servo_home_us) g_cfg.servo_home_us = 1500;
+    if (nvs_get_u16(h, NVS_KEY_SV_PRESS, &sv) == ESP_OK) g_cfg.servo_press_us = sv; else if (!g_cfg.servo_press_us) g_cfg.servo_press_us = 1800;
     nvs_close(h);
 }
 
@@ -282,6 +296,10 @@ static const char *INDEX_HTML =
 "<label>STA Password<input id=sta_psk type=password></label>"
 "<button onclick='joinsta()'>Join Wi-Fi</button>"
 
+"<hr><b>Servo Positions</b>"
+"<label>Home (µs)<input id=svh type=number min=800 max=2200 step=10></label>"
+"<label>Press (µs)<input id=svp type=number min=800 max=2200 step=10></label>"
+
 "<button onclick='save()'>Save</button>"
 "</fieldset>"
 "<script>"
@@ -289,11 +307,11 @@ static const char *INDEX_HTML =
 " const r=await fetch('/api/actuator',{method:'POST',headers:{'Content-Type':'application/json'},"
 " body:JSON.stringify({action:kind})}); if(!r.ok) alert('Actuator failed');}"
 "async function load(){const r=await fetch('/api/config'); if(r.ok){const c=await r.json();"
-" u.value=c.user; ip.value=c.ip; mask.value=c.mask; gw.value=c.gw; ssid.value=c.ap_ssid; if(c.sta_ssid) sta_ssid.value=c.sta_ssid;}}"
+" u.value=c.user; ip.value=c.ip; mask.value=c.mask; gw.value=c.gw; ssid.value=c.ap_ssid; if(c.sta_ssid) sta_ssid.value=c.sta_ssid; if(c.servo_home_us) svh.value=c.servo_home_us; if(c.servo_press_us) svp.value=c.servo_press_us;}}"
 "async function joinsta(){const body={ssid:sta_ssid.value, pass:sta_psk.value};"
 " const r=await fetch('/api/wifi/join',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});"
 " if(r.ok) alert('Joining… check logs and STA IP.'); else alert('Join failed');}"
-"async function save(){const body={user:u.value, pass:p.value, ip:ip.value, mask:mask.value, gw:gw.value, ap_ssid:ssid.value, ap_pass:psk.value};"
+"async function save(){const body={user:u.value, pass:p.value, ip:ip.value, mask:mask.value, gw:gw.value, ap_ssid:ssid.value, ap_pass:psk.value, servo_home_us:parseInt(svh.value||0), servo_press_us:parseInt(svp.value||0)};"
 " const r=await fetch('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});"
 " if(r.ok) alert('Saved. Reboot may be needed.'); else alert('Save failed');}"
 "load();</script></body></html>";
@@ -317,13 +335,15 @@ static esp_err_t root_get(httpd_req_t *req){
 
 static esp_err_t status_get(httpd_req_t *req){
     if (auth_guard(req) != ESP_OK) return ESP_FAIL;
-    char buf[256];
+    char buf[384];
     ip4_addr_t ip = { .addr = g_cfg.ip };
     ip4_addr_t mask = { .addr = g_cfg.netmask };
     ip4_addr_t gw = { .addr = g_cfg.gw };
     snprintf(buf, sizeof(buf),
-        "{\"user\":\"%s\",\"ip\":\"%s\",\"mask\":\"%s\",\"gw\":\"%s\",\"ap_ssid\":\"%s\",\"sta_ssid\":\"%s\"}",
-        g_cfg.admin_user, ip4addr_ntoa(&ip), ip4addr_ntoa(&mask), ip4addr_ntoa(&gw), g_cfg.ap_ssid, g_cfg.sta_ssid);
+        "{\"user\":\"%s\",\"ip\":\"%s\",\"mask\":\"%s\",\"gw\":\"%s\",\"ap_ssid\":\"%s\",\"sta_ssid\":\"%s\",\"servo_home_us\":%u,\"servo_press_us\":%u}",
+        g_cfg.admin_user, ip4addr_ntoa(&ip), ip4addr_ntoa(&mask), ip4addr_ntoa(&gw), g_cfg.ap_ssid, g_cfg.sta_ssid,
+        (unsigned)g_cfg.servo_home_us, (unsigned)g_cfg.servo_press_us);
+
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, buf);
 }
@@ -342,7 +362,7 @@ static esp_err_t config_put(httpd_req_t *req){
         if(p){ p=strchr(p,':'); if(p){ p++; while(*p==' '||*p=='\"') p++; char *q=p; while(*q && *q!='\"' && *q!='}' && *q!=',' && (q-p)<(SZ-1)) q++; \
         size_t n=q-p; if(n>0){ memcpy(DEST,p,n); DEST[n]=0; } } } }while(0)
 
-    char user[32]={0},pass[64]={0}, ip[32]={0},mask[32]={0},gw[32]={0}, ssid[32]={0}, apsk[64]={0};
+    char user[32]={0},pass[64]={0}, ip[32]={0},mask[32]={0},gw[32]={0}, ssid[32]={0}, apsk[64]={0}, svh[8]={0}, svp[8]={0};
     GET_STR("user", user, sizeof(user));
     GET_STR("pass", pass, sizeof(pass));
     GET_STR("ip", ip, sizeof(ip));
@@ -350,6 +370,8 @@ static esp_err_t config_put(httpd_req_t *req){
     GET_STR("gw", gw, sizeof(gw));
     GET_STR("ap_ssid", ssid, sizeof(ssid));
     GET_STR("ap_pass", apsk, sizeof(apsk));
+    GET_STR("servo_home_us", svh, sizeof(svh));
+    GET_STR("servo_press_us", svp, sizeof(svp));
 
     if (user[0]) strncpy(g_cfg.admin_user, user, sizeof(g_cfg.admin_user)-1);
     if (pass[0]) strncpy(g_cfg.admin_pass, pass, sizeof(g_cfg.admin_pass)-1);
@@ -359,6 +381,9 @@ static esp_err_t config_put(httpd_req_t *req){
     if (ip4addr_aton(gw, &a)) g_cfg.gw = a.addr;
     if (ssid[0]) strncpy(g_cfg.ap_ssid, ssid, sizeof(g_cfg.ap_ssid)-1);
     if (apsk[0]) strncpy(g_cfg.ap_pass, apsk, sizeof(g_cfg.ap_pass)-1);
+
+    if (svh[0]) { int v = atoi(svh); if (v < 800) v = 800; if (v > 2200) v = 2200; g_cfg.servo_home_us = (uint16_t)v; }
+    if (svp[0]) { int v = atoi(svp); if (v < 800) v = 800; if (v > 2200) v = 2200; g_cfg.servo_press_us = (uint16_t)v; }
 
     cfg_save();
     httpd_resp_sendstr(req, "OK");
